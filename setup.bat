@@ -56,6 +56,15 @@ if not exist .env (
     echo [OK] .env already exists
 )
 
+:: ── Create .vscode/mcp.json if missing ───────────────────────
+if not exist .vscode\mcp.json (
+    echo [..] Creating .vscode\mcp.json from template...
+    copy .vscode\mcp-config-template.json .vscode\mcp.json >nul
+    echo [OK] Created .vscode\mcp.json — uses $"{workspaceFolder}" so it works anywhere
+) else (
+    echo [OK] .vscode\mcp.json already exists
+)
+
 :: ── Done ──────────────────────────────────────────────────────
 echo.
 echo ============================================================
