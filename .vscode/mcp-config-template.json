@@ -1,0 +1,18 @@
+{
+  "servers": {
+    "etl-analysis": {
+      "type": "stdio",
+      "command": "${workspaceFolder}\\venv\\Scripts\\python.exe",
+      "args": [
+        "${workspaceFolder}\\etl_stdio.py"
+      ]
+    },
+    "power-socwatch": {
+      "type": "stdio",
+      "command": "${workspaceFolder}\\venv\\Scripts\\python.exe",
+      "args": [
+        "${workspaceFolder}\\power_socwatch_stdio.py"
+      ]
+    }
+  }
+}

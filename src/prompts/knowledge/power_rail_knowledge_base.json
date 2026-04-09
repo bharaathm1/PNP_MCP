@@ -1,0 +1,218 @@
+{
+  "metadata": {
+    "source": "WCLPowerMap.xlsx",
+    "description": "SOC and Platform Power Rail Knowledge Base",
+    "version": "1.0",
+    "last_updated": "2026-01-16"
+  },
+  "power_rails": {
+    "soc_rails": [
+      {
+        "name": "VCCCORE",
+        "description": "Main CPU cores (Performance cores), core logic",
+        "ips_connected": [
+          "P-Cores or Performant cores"
+        ],
+        "debug_hints": "Except for Browsing/Catapult or ADK browsing KPI, all Power KPIs should be running on E-Cores. P-Cores should be bare minimal close to 0.",
+        "socwatch_metrics": [
+          "ACPI C0, PC0, CC0",
+          "Core C-State Summary CC0",
+          "Package C-State (OS) Summary - ACPI C0",
+          "Package C-State Summary - PC0",
+          "CPU P-State Average Frequencies",
+          "Overall Platform Activity: process_wise_summary"
+        ]
+      },
+      {
+        "name": "VCCST",
+        "description": "Always-on domains, retention SRAM, deep AON logic",
+        "ips_connected": [],
+        "debug_hints": "Depends on PC10 residency. \"AGGREGATE-SUBSYSTEM\" value which is reported in nsec, if is less than 1msec will cause lower PC10 residency. We should have AGGREGATE-SUBSYSTEM residency reported in LTR Snoop Histogram in Socwatch should be lesser in <1msec range. more the residency in <1msec range more VccST power.",
+        "socwatch_metrics": [
+          "Package C-State Summary - PC10",
+          "LTR Snoop Histogram: AGGREGATE-SUBSYSTEM bucket residency"
+        ]
+      },
+      {
+        "name": "VCCGT",
+        "description": "Graphics (GT) core, GT logic",
+        "ips_connected": [],
+        "debug_hints": "Graphics: RC0 residency or GFX P-state frequency.",
+        "socwatch_metrics": [
+          "GFX C-State Summary",
+          "GFX P-State Summary"
+        ]
+      },
+      {
+        "name": "VCCSA",
+        "description": "System Agent, fabric, memory controller, display engine, NPU, IPU",
+        "ips_connected": [
+          "Memory Logic",
+          "IPU",
+          "NPU",
+          "Media",
+          "Display"
+        ],
+        "debug_hints": "Regression here can be detected by checking Residency, Frequency & Bandwidth of each IPs connected to this rail. Need to look at below info from Socwatch csv log.\n1. Memory: MEMSS Freq/SAGV Freq & Total Memory Bandwidth\n2. IPU: IS/PS Frequency For WCL, there is NO IPU, so ignore. \n3. NPU: NPU D0 residency, NPU Frequency, NPU Bandwidth\n4. Media: Media-C0 Residency, Media Frequency\n5. Display: Cdclock from ETL or Display P-State & Display VC1 bandwidth from Socwatch",
+        "socwatch_metrics": [
+          "1. Memory",
+          "MEMSS P-State Summary",
+          "DDR Bandwidth Summary: total_bandwidth",
+          "2. NPU",
+          "NPU D-State Summary",
+          "NPU P-State Summary",
+          "DDR Bandwidth Summary: individual_IP:NPU-READS-WRITES",
+          "3. Media",
+          "Media C-State Summary",
+          "Media P-State Summary",
+          "NOC-MEDIA-WRITES, NOC-MEDIA-READS",
+          "4. Display",
+          "DISPLAY-VC1-READS",
+          "PSR Residency Summary"
+        ]
+      },
+      {
+        "name": "VCC_LP_ECORE",
+        "description": "Low-power E-cores (Atom), Atom core logic",
+        "ips_connected": [
+          "E-Cores or efficient cores"
+        ],
+        "debug_hints": "If this Regresses, mostly Software issue. To debug, start with ACPI C-State C0, if this is regressed confirmed Software regression i.e OS/App is asking for more work. Check for Overall Platform Activity in Socwatch. Upon Confirmation rely more on ETL traces as this is mostly Software.",
+        "socwatch_metrics": [
+          "ACPI C0, PC0, CC0",
+          "Core C-State Summary CC0",
+          "Package C-State (OS) Summary - ACPI C0",
+          "Package C-State Summary - PC0",
+          "CPU P-State Average Frequencies",
+          "Overall Platform Activity: process_wise_summary"
+        ]
+      },
+      {
+        "name": "VDD2_CPU",
+        "description": "DDR/DRAM interface, memory PHY",
+        "ips_connected": [
+          "Memory PHY"
+        ],
+        "debug_hints": "This Regresses when Total Memory Bandwidth regresses.",
+        "socwatch_metrics": [
+          "DDR Bandwidth Summary: total_bandwidth"
+        ]
+      },
+      {
+        "name": "VCCRTC",
+        "description": "Real-time clock, RTC logic",
+        "ips_connected": [
+          "RTC Logic"
+        ],
+        "debug_hints": "Never regresses.",
+        "socwatch_metrics": []
+      },
+      {
+        "name": "VCCPRIM_VNNAON",
+        "description": "Always-on infrastructure, fuse sense, platform logic",
+        "ips_connected": [
+          "CNVi i.e WLAN Digital logic",
+          "BT"
+        ],
+        "debug_hints": "If this regresses, check for WLAN/BT LTR value & Aggregated LTR. If they look same then look for LTR Snoop Histogram to check which Ips are requesting <1msec. They are concerning thing for power. Look for WLAN Module power from Platform to double confirm the regression due to High WLAN activity.",
+        "socwatch_metrics": [
+          "LTR Snoop Histogram:CNVI-WIFI",
+          "LTR Snoop Histogram:CNVI-BT"
+        ]
+      },
+      {
+        "name": "VCCPRIM_IO",
+        "description": "General IO, PLLs, DTS, CEP, platform IO",
+        "ips_connected": [],
+        "debug_hints": "Platform IO transfers or SSD IO transfer. SSD Reads or Writes will impact PRIM_IO. Check for SSD component power on Platform to double confirm the high SSD actviity.",
+        "socwatch_metrics": [
+          "LTR Snoop Histogram:PCIE-CONTROLLER"
+        ]
+      },
+      {
+        "name": "VCCPRIM_1P8",
+        "description": "Analog blocks, PLLs, some IO, display PHY",
+        "ips_connected": [],
+        "debug_hints": "",
+        "socwatch_metrics": []
+      },
+      {
+        "name": "VCCPRIM_1P8_FLTR",
+        "description": "Filtered analog supply, sensitive analog Ips",
+        "ips_connected": [],
+        "debug_hints": "",
+        "socwatch_metrics": []
+      },
+      {
+        "name": "VCCPRIM_3P3",
+        "description": "Legacy IO, eSPI, SPI, some platform logic",
+        "ips_connected": [],
+        "debug_hints": "",
+        "socwatch_metrics": []
+      },
+      {
+        "name": "VCCPRIM_UCIE",
+        "description": "UCIe PHY for die-to-die connectivity",
+        "ips_connected": [],
+        "debug_hints": "Compute Die to PCD die connectivity.",
+        "socwatch_metrics": []
+      },
+      {
+        "name": "P_SOC",
+        "description": "Summation of all SOC power rails. Primary one to be tracked.",
+        "ips_connected": [],
+        "debug_hints": "SOC = Sum of all SOC rails.",
+        "socwatch_metrics": []
+      }
+    ],
+    "platform_rails": [
+      {
+        "name": "P_MEMORY",
+        "description": "Memory Module power on RVP. Impacted by Memory bandwidth & Freq of operation. Depends on no. of ranks, capacity, no. of Channels & Memory Technology(LP5 vs DDR5)",
+        "ips_connected": [],
+        "debug_hints": "",
+        "socwatch_metrics": [
+          "DDR Bandwidth Summary: total_bandwidth"
+        ]
+      },
+      {
+        "name": "P_DISPLAY",
+        "description": "Panel electronics power on RVP. Power Consumption by Timing Controller(Tcon) & PSR SRAM. Impacted by variations in refresh rate & PSR memory usage. Depends on Tcon vendor, LRR feature supports& Resolutions.",
+        "ips_connected": [],
+        "debug_hints": "",
+        "socwatch_metrics": [
+          "Display Refresh Rate Residency",
+          "PSR Residency Summary"
+        ]
+      },
+      {
+        "name": "P_BACKLIGHT",
+        "description": "Backlight power on RVP. Power Consumption from LEDs & drivers. Impacted by brightness level of Screen, controlled through PWM module of PCH. depends on physical size of Display and Luminance capacity.",
+        "ips_connected": [],
+        "debug_hints": "",
+        "socwatch_metrics": []
+      },
+      {
+        "name": "P_WLAN",
+        "description": "WLAN module power on RVP. Power Consumption by Radio, Antennas. Depends on Tx or Rx from these Radios.",
+        "ips_connected": [],
+        "debug_hints": "",
+        "socwatch_metrics": []
+      },
+      {
+        "name": "P_SSD",
+        "description": "NVMe SSD component power on RVP. Power consumption from Component side SSD controller, DRAM cache, Flash memory chips from x4 PCIe lane. Impacted by Reads & writes to SSD, IO Throughput, PCIe link states. Depends on NVMe type Gen Gen4/Gen5), Capacity, NVMe vendor, Flash chip type (SLC/MLC/QLC)",
+        "ips_connected": [],
+        "debug_hints": "SSDs are connected to PCIe controller A or B.",
+        "socwatch_metrics": []
+      },
+      {
+        "name": "P_VBATA",
+        "description": "Battery input power which represents Total System power inclusive of VR losses and sum of all above rails",
+        "ips_connected": [],
+        "debug_hints": "",
+        "socwatch_metrics": []
+      }
+    ]
+  }
+}

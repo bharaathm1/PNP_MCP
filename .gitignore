@@ -1,0 +1,22 @@
+# Local MCP config (contains credentials / personal paths — never commit)
+.vscode/mcp.json
+
+# Local environment config — created by setup.bat from .env.example
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Generated database — recreated by setup.bat + seed_knowledge.py
+data/mongita/
+
+# Logs / temp
+logs/
+*.log
+*.tmp
+etl_test_stderr.txt
