@@ -165,6 +165,7 @@ class StandaloneEtlTrace:
         self.df_ppmsettingschange = pd.DataFrame()
         self.df_ppm_settings = pd.DataFrame()
         self.df_containmentpolicychange = pd.DataFrame()
+        self.df_containment_status = pd.DataFrame()
         self.df_fg_bg_ratio = pd.DataFrame()
         self.df_c0_intervals = pd.DataFrame()
         self.df_package_energy = pd.DataFrame()
@@ -192,6 +193,13 @@ class StandaloneEtlTrace:
             print(f"[TIMING] [OK] wpscontainmentunpark: {len(self.df_wpscontainmentunpark)} records")
         except Exception as e:
             print(f"[WARNING] wpscontainmentunpark extraction failed: {e}")
+
+        try:
+            print("[TIMING] Extracting containment_status...")
+            self.df_containment_status = self.containment_status()
+            print(f"[TIMING] [OK] containment_status: {len(self.df_containment_status)} records")
+        except Exception as e:
+            print(f"[WARNING] containment_status extraction failed: {e}")
         
         try:
             print("[TIMING] Extracting heteroparkingselection...")
@@ -362,15 +370,17 @@ class StandaloneEtlTrace:
     # EXTRACTION METHODS - Complete implementations from speedlibs_clean.py
     # =========================================================================
     
+    _WLC_LABELS = {0: "Idle", 1: "BatteryLife", 2: "Sustained", 3: "Bursty"}
+
     def wlc(self):
         """Extract WLC (Workload Classification) data"""
         try:
             timestamp = []
             wlc_status = []
-            
+
             event_type_list = ["DptfCpuEtwProvider//win:Info"]
             events = self.trace.get_events(event_types=event_type_list, time_range=self.time_range)
-            
+
             for event in events:
                 try:
                     if event["String"] == "SOCWC classification = ":
@@ -378,11 +388,66 @@ class StandaloneEtlTrace:
                         wlc_status.append(event["Status"])
                 except:
                     continue
-            
+
             print(f"[WLC] Extracted {len(timestamp)} WLC events")
             return pd.DataFrame({"timestamp": timestamp, "wlc": wlc_status})
         except Exception as e:
             print(f"[WARNING] WLC extraction error: {e}")
+            return pd.DataFrame()
+
+    def compute_wlc_histogram(self, df_wlc: pd.DataFrame) -> pd.DataFrame:
+        """
+        Forward-fill WLC state at 1ms granularity then compute residency histogram.
+        States: 0=Idle, 1=BatteryLife, 2=Sustained, 3=Bursty
+        """
+        try:
+            if df_wlc.empty:
+                return pd.DataFrame()
+            df = df_wlc.sort_values("timestamp").reset_index(drop=True)
+            t_start_ms = int(df["timestamp"].iloc[0] * 1000)
+            t_end_ms   = int(df["timestamp"].iloc[-1] * 1000) + 1
+            n_cells    = t_end_ms - t_start_ms
+            if n_cells <= 0:
+                return pd.DataFrame()
+            states = np.full(n_cells, np.nan)
+            for _, row in df.iterrows():
+                idx = int(row["timestamp"] * 1000) - t_start_ms
+                if 0 <= idx < n_cells:
+                    states[idx] = row["wlc"]
+            s = pd.Series(states).ffill().bfill()
+            total = len(s)
+            rows = []
+            for state_val, label in sorted(self._WLC_LABELS.items()):
+                count = int((s == state_val).sum())
+                rows.append({
+                    "wlc":         state_val,
+                    "state":       label,
+                    "duration_ms": count,
+                    "duration_s":  round(count / 1000, 3),
+                    "pct":         round(count / total * 100, 2) if total > 0 else 0.0,
+                })
+            print(f"[WLC] histogram: {total}ms window | states: {sorted(df['wlc'].unique().tolist())}")
+            return pd.DataFrame(rows)
+        except Exception as e:
+            print(f"[WARNING] compute_wlc_histogram error: {e}")
+            return pd.DataFrame()
+
+    def containment_status(self):
+        """Extract ContainmentEnabled from HeteroParkingSelectionCount events."""
+        try:
+            containment_enabled = []
+            event_type_list = ["Microsoft-Windows-Kernel-Processor-Power/HeteroParkingSelectionCount/win:Info"]
+            ev = self.trace.get_events(event_types=event_type_list, time_range=self.time_range)
+            for i in ev:
+                try:
+                    containment_enabled.append(i["ContainmentEnabled"])
+                except Exception:
+                    pass
+            df = pd.DataFrame({"ContainmentEnabled": containment_enabled}).reset_index(drop=True)
+            print(f"[CONTAINMENT] containment_status: {len(df)} records")
+            return df
+        except Exception as e:
+            print(f"[WARNING] containment_status error: {e}")
             return pd.DataFrame()
     
     def heteroresponse(self):
@@ -1283,36 +1348,30 @@ def run_comprehensive_analysis(etl_file_path, output_dir=None,
         df_containment_breach = analyze_containment_breach(combined_df, etl_trace.trace)
         print(f"[DATA] Containment breach events: {len(df_containment_breach)}")
         
-        # 4. Analyze PPM behavior against constraints
-        print("[ANALYSIS] Running PPM Behavior analysis...")
-        df_ppm_behaviour = analyze_ppm_behaviour(
-            etl_trace.df_ppm_settings,
-            ppm_constraints_file or DEFAULT_PPM_CONSTRAINT_FILE
-        )
-        print(f"[DATA] PPM behavior analysis: {len(df_ppm_behaviour)}")
-        
-        # 5. PPM Validation (against val constraints)
-        print("[ANALYSIS] Running PPM Validation...")
-        df_ppm_validation = analyze_ppm_behaviour(
-            etl_trace.df_ppm_settings,
-            ppm_val_constraints_file or DEFAULT_PPM_VAL_CONSTRAINT_FILE
-        )
-        print(f"[DATA] PPM validation: {len(df_ppm_validation)}")
-        
+        # 4. Compute WLC histogram
+        print("[ANALYSIS] Computing WLC histogram...")
+        df_wlc_histogram = etl_trace.compute_wlc_histogram(etl_trace.df_wlc)
+        print(f"[DATA] WLC histogram rows: {len(df_wlc_histogram)}")
+
+        # 5. Extract containment status
+        print("[ANALYSIS] Extracting containment status...")
+        df_containment_status = etl_trace.containment_status()
+        print(f"[DATA] Containment status records: {len(df_containment_status)}")
+
         # 6. Create results dictionary (SAME format as speedlibs_service)
         results_dict = {
             # Core analysis dataframes
             "df_combined_dataframe": combined_df,
             "df_containment_breach": df_containment_breach,
             "df_preprocessed": df_preprocessed,
-            "df_PPM_behaviour": df_ppm_behaviour,
-            "df_PPM_Validation": df_ppm_validation,
-            
+
             # Primary trace dataframes
             "df_wlc": etl_trace.df_wlc,
+            "df_wlc_histogram": df_wlc_histogram,
             "df_heteroresponse": etl_trace.df_heteroresponse,
             "df_cpu_util": etl_trace.df_cpu_util,
             "df_cpu_freq": etl_trace.df_cpu_freq,
+            "df_containment_status": df_containment_status,
             "df_containmentunpark": etl_trace.df_wpscontainmentunpark,
             "df_heteroparkingselection": etl_trace.df_heteroparkingselection,
             "df_softparkselection": etl_trace.df_softparkselection,

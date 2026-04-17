@@ -12,7 +12,8 @@ Usage:
     speed.exe run standalone_containment.py --etl_file <path>
 
 Output keys in PKL:
-    df_containmentunpark       - WPS containment unpark events
+    df_containment_status      - ContainmentEnabled from HeteroParkingSelectionCount events
+    df_containmentunpark       - WPS containment unpark events (before/after unpark counts)
     df_containment_policy_change - containment policy change events
     df_containment_breach      - derived breach events (ContainmentEnabled + unpark differential)
 """
@@ -55,6 +56,29 @@ def _pkl_path(etl_file_path: str) -> str:
 
 
 # ── Extraction functions ───────────────────────────────────────────────────
+
+def extract_containment_status(trace):
+    """
+    Extract ContainmentEnabled from HeteroParkingSelectionCount events.
+    This is the primary containment active/inactive indicator.
+    """
+    try:
+        containment_enabled = []
+        event_type_list = ["Microsoft-Windows-Kernel-Processor-Power/HeteroParkingSelectionCount/win:Info"]
+        ev = trace.get_events(event_types=event_type_list, time_range=trace.time_range)
+        for i in ev:
+            try:
+                containment_enabled.append(i["ContainmentEnabled"])
+            except Exception:
+                pass
+        df = pd.DataFrame({"ContainmentEnabled": containment_enabled})
+        df = df.reset_index(drop=True)
+        print(f"[CONTAINMENT] containment_status: {len(df)} records")
+        return df
+    except Exception as e:
+        print(f"[WARNING] containment_status error: {e}")
+        return pd.DataFrame()
+
 
 def extract_wpscontainmentunpark(trace):
     try:
@@ -154,11 +178,13 @@ def main():
     print(f"[LOAD] OK — {type(trace).__name__}")
 
     # ── Extract ──────────────────────────────────────────────────────────
+    df_status    = extract_containment_status(trace)
     df_unpark    = extract_wpscontainmentunpark(trace)
     df_policy    = extract_containment_policy_change(trace)
     df_breach    = derive_containment_breach(df_unpark)
 
     results = {
+        "df_containment_status":        df_status,
         "df_containmentunpark":        df_unpark,
         "df_containment_policy_change": df_policy,
         "df_containment_breach":        df_breach,

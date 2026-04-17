@@ -1967,34 +1967,37 @@ def find_power_summary_files(
     md_cache = output_dir / "Power_output_summary_final_markdown.txt"
     _manifest_p = output_dir / "power_compile_manifest.json"
 
-    # Fast path: if markdown + manifest both exist, return the file list from the
-    # manifest directly — skip the (slow) _find_summary_csvs scan entirely.
-    # The expensive scan only runs on first call or when force_reparse=True.
-    if (not force_reparse) and md_cache.exists() and md_cache.stat().st_size > 0 and _manifest_p.exists():
+    # Fast path: the output markdown existing with content is sufficient proof that
+    # compilation already completed — no manifest required to skip the scan.
+    # The expensive _find_summary_csvs scan only runs on first call or force_reparse=True.
+    if (not force_reparse) and md_cache.exists() and md_cache.stat().st_size > 0:
+        # Try to enrich response with file list from manifest, but never fall
+        # through to a live UNC scan just because the manifest is absent.
+        summary_files = []
         try:
-            import json as _json_fpsf
-            with open(_manifest_p, "r", encoding="utf-8") as _mf:
-                _man = _json_fpsf.load(_mf)
-            summary_files = _man.get("compiled_files", [])
-            if summary_files:
-                sample_names = [Path(f).name for f in summary_files[:5]]
-                more = len(summary_files) - 5
-                return {
-                    "found": True,
-                    "file_count": len(summary_files),
-                    "file_paths": summary_files,
-                    "file_names": sample_names + ([f"... and {more} more"] if more > 0 else []),
-                    "already_compiled": True,
-                    "can_read": True,
-                    "staging_hint": None,
-                    "output_dir": str(output_dir),
-                    "message": (
-                        "Already compiled — Analysis/power_output/ exists. "
-                        "Call compile_power_data() to run/cache the pipeline, then query_power_matrix() to browse results."
-                    ),
-                }
+            if _manifest_p.exists():
+                import json as _json_fpsf
+                with open(_manifest_p, "r", encoding="utf-8") as _mf:
+                    _man = _json_fpsf.load(_mf)
+                summary_files = _man.get("compiled_files", [])
         except Exception:
-            pass  # manifest corrupt → fall through to full scan
+            pass
+        sample_names = [Path(f).name for f in summary_files[:5]]
+        more = len(summary_files) - 5
+        return {
+            "found": True,
+            "file_count": len(summary_files),
+            "file_paths": summary_files,
+            "file_names": sample_names + ([f"... and {more} more"] if more > 0 else []),
+            "already_compiled": True,
+            "can_read": True,
+            "staging_hint": None,
+            "output_dir": str(output_dir),
+            "message": (
+                "Already compiled — Analysis/power_output/ exists. "
+                "Call compile_power_data() to run/cache the pipeline, then query_power_matrix() to browse results."
+            ),
+        }
 
     # Full scan — only runs on first call or when force_reparse=True.
     summary_files = [f for f in _find_summary_csvs(str(folder)) if str(output_dir) not in f]
@@ -2119,21 +2122,16 @@ def compile_power_data(
             "message": (
                 f"Pipeline {'loaded from cache' if cached else 'compiled'}. "
                 f"{rail_count} rails × {len(kpi_groups_grouped)} KPI groups. "
-                f"KPIs: {kpi_groups_grouped}. "
-                f"Excel: {output_dir / 'Power_output_summary.xlsx'}. "
                 "Use query_power_matrix(parent_folder, rails=[...], kpis=[...]) to browse results."
             ),
         }
 
     # Return cached result if available.
-    # Fast path: if markdown + manifest both exist, trust the cache without
-    # re-scanning the (potentially slow UNC) folder. A full re-scan only
+    # Fast path: the output markdown existing with content is sufficient proof that
+    # compilation already completed — no manifest required.  A full re-compile only
     # happens when force_recompile=True.
     if not force_recompile and md_path.exists() and md_path.stat().st_size > 0:
-        _manifest_p = output_dir / "power_compile_manifest.json"
-        if _manifest_p.exists():
-            return _build_tiered_response(cached=True)
-        # No manifest → old-style cache → fall through and re-compile
+        return _build_tiered_response(cached=True)
 
     # Early read-test: if the first summary CSV can't be opened, tell the agent to stage files first.
     _probe_files = [f for f in _find_summary_csvs(str(folder)) if str(output_dir) not in f]
@@ -2254,8 +2252,22 @@ def query_power_matrix(
     )] = False,
 ) -> Dict[str, Any]:
     """Query the compiled power matrix with averaging and filtering. Low token cost."""
-    _PRIORITY = ["P_SOC", "P_VCCCORE", "P_VCC_LP_ECORE", "P_VCCSA",
-                 "P_BACKLIGHT", "P_DISPLAY", "P_MEMORY", "P_SSD", "P_WLAN"]
+    _PRIORITY = [
+        # Top-level platform rails (Table A)
+        "P_SOC", "P_CPU_TOTAL", "P_CPU_PCH_TOTAL",
+        "P_MEMORY", "P_DISPLAY", "P_BACKLIGHT", "P_SSD", "P_WLAN",
+        # SoC sub-rails (Table B)
+        "VCC_LP_ECORE", "VCCCORE", "VCCSA", "VCCGT",
+        "VCCPRIM_IO", "VDD2_CPU", "VCCST", "VCCPRIM_VNNAON",
+        # Alternate prefixes seen on some boards
+        "P_VCCCORE", "P_VCC_LP_ECORE", "P_VCCSA", "P_VCCGT",
+        "P_VDD2_CPU", "P_VCCST", "P_VCCPRIM_IO", "P_VCCPRIM_VNNAON",
+        # PACS P_VAL_ prefix variants
+        "P_VAL_VCC_LP", "P_VAL_VCCCORE", "P_VAL_VCCSA", "P_VAL_VCCGT",
+        "P_VAL_VCCPRIM_IO", "P_VAL_VDD2_CPU", "P_VAL_VCCST", "P_VAL_VCCPRIM_VNN",
+        # Battery / system total
+        "P_VBATA", "VBATA",
+    ]
 
     csv_final = Path(parent_folder) / "Analysis" / "power_output" / "Power_output_summary_final.csv"
     if not csv_final.exists():
@@ -2332,9 +2344,21 @@ def query_power_matrix(
         if not display_rails:
             display_rails = row_order[:8]
     else:
-        display_rails = [r for r in row_order if r in _PRIORITY]
-        if not display_rails:
-            display_rails = row_order[:8]
+        # No filter requested — return priority rails first, then remaining rails up to a cap.
+        # This prevents very large boards (30+ rails) from flooding the context window.
+        _MAX_RAILS_DEFAULT = 20
+        priority_lower = [p.lower() for p in _PRIORITY]
+        ordered: List[str] = []
+        # Priority rails first (in _PRIORITY order)
+        for p in _PRIORITY:
+            for r in row_order:
+                if r not in ordered and (r.lower().startswith(p.lower()) or r.lower() == p.lower()):
+                    ordered.append(r)
+        # Append any remaining rails not already included
+        for r in row_order:
+            if r not in ordered:
+                ordered.append(r)
+        display_rails = ordered[:_MAX_RAILS_DEFAULT]
 
     # Build table (averaged or individual)
     iteration_notes: List[str] = []
@@ -2392,13 +2416,6 @@ def query_power_matrix(
         "table": table_md,
         "rails_shown": display_rails,
         "kpi_groups_shown": list(selected_groups.keys()),
-        "all_kpi_groups": all_group_names,
         "iteration_notes": iteration_notes,
-        "matrix_path": str(csv_final),
-        "message": (
-            f"Showing {len(display_rails)} rail(s) × {len(selected_groups)} KPI group(s). "
-            + (f"Averaged: {'; '.join(iteration_notes)}. " if iteration_notes else "")
-            + f"All KPI groups: {all_group_names}. "
-            "Use rails=[...] and/or kpis=[...] to filter, show_individual_runs=True to see each run."
-        ),
+        # all_rail_names / all_kpi_groups / message omitted to keep response compact
     }

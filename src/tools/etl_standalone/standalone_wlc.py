@@ -13,7 +13,11 @@ Usage:
     speed.exe run standalone_wlc.py --etl_file <path>
 
 Output keys in PKL:
-    df_wlc            - SOCWC classification events (timestamp, wlc status)
+    df_wlc             - SOCWC classification events (timestamp, wlc status)
+    df_wlc_histogram   - Forward-filled 1ms histogram; columns:
+                         wlc (int), state (str), duration_ms (int),
+                         duration_s (float), pct (float)
+                         States: 0=Idle, 1=BatteryLife, 2=Sustained, 3=Bursty
     df_expectedutility - ExpectedUtility vs ActualUtility per interval
 """
 
@@ -90,6 +94,57 @@ def extract_expected_utility(trace):
         return pd.DataFrame()
 
 
+WLC_LABELS = {0: "Idle", 1: "BatteryLife", 2: "Sustained", 3: "Bursty"}
+
+
+def compute_wlc_histogram(df_wlc: pd.DataFrame) -> pd.DataFrame:
+    """
+    Forward-fill WLC state at 1ms granularity across the trace window,
+    then compute a residency histogram.
+    States: 0=Idle, 1=BatteryLife, 2=Sustained, 3=Bursty
+    """
+    if df_wlc.empty:
+        return pd.DataFrame()
+
+    df = df_wlc.sort_values("timestamp").reset_index(drop=True)
+
+    # Build a 1ms-resolution index
+    t_start_ms = int(df["timestamp"].iloc[0] * 1000)
+    t_end_ms   = int(df["timestamp"].iloc[-1] * 1000) + 1
+    n_cells    = t_end_ms - t_start_ms
+
+    if n_cells <= 0:
+        return pd.DataFrame()
+
+    # Place each event into its 1ms cell, then forward-fill
+    states = np.full(n_cells, np.nan)
+    for _, row in df.iterrows():
+        idx = int(row["timestamp"] * 1000) - t_start_ms
+        if 0 <= idx < n_cells:
+            states[idx] = row["wlc"]
+
+    # Forward fill (carry last known state), back-fill leading NaNs
+    s = pd.Series(states).ffill().bfill()
+
+    total = len(s)
+    rows = []
+    for state_val, label in sorted(WLC_LABELS.items()):
+        count = int((s == state_val).sum())
+        pct   = round(count / total * 100, 2) if total > 0 else 0.0
+        rows.append({
+            "wlc":         state_val,
+            "state":       label,
+            "duration_ms": count,
+            "duration_s":  round(count / 1000, 3),
+            "pct":         pct,
+        })
+
+    df_hist = pd.DataFrame(rows)
+    print(f"[WLC] histogram: {total} ms window | "
+          f"states observed: {sorted(df['wlc'].unique().tolist())}")
+    return df_hist
+
+
 def main():
     parser = argparse.ArgumentParser(description="Standalone WLC Analysis (speed.exe)")
     parser.add_argument("--etl_file", required=True)
@@ -110,8 +165,12 @@ def main():
     trace = tracedm.load_trace(etl_file=args.etl_file)
     print(f"[LOAD] OK — {type(trace).__name__}")
 
+    df_wlc = extract_wlc(trace)
+    df_wlc_histogram = compute_wlc_histogram(df_wlc)
+
     results = {
-        "df_wlc":             extract_wlc(trace),
+        "df_wlc":             df_wlc,
+        "df_wlc_histogram":   df_wlc_histogram,
         "df_expectedutility": extract_expected_utility(trace),
         "meta": {
             "analysis": PKL_SUFFIX,

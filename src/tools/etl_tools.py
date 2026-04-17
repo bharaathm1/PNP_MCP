@@ -494,6 +494,121 @@ def list_standalone_scripts(script_name: str = None) -> Dict[str, Any]:
 
 @mcp.tool()
 @async_tool
+def get_etl_script_context() -> Dict[str, Any]:
+    """
+    Returns a complete coding context needed to generate a new standalone ETL
+    analysis script (or understand existing ones).
+
+    Call this tool BEFORE calling create_custom_standalone_script so you have
+    the SPEED API reference, adapted instructions, and the catalog of existing
+    scripts readily available.
+
+    Returns a dict with three keys:
+
+    instructions : str
+        Adapted coding rules for standalone .py scripts running via speed.exe.
+    speed_api : str
+        Full SPEED API reference (IEventTrace high-level methods + get_events
+        low-level pattern + PKL convention + typical script skeleton).
+    existing_scripts : list[dict]
+        Catalog of every standalone_*.py in etl_standalone/.  Each entry has:
+            name        – script name without "standalone_" prefix and ".py"
+            filename    – e.g. "standalone_containment.py"
+            pkl_suffix  – suffix used in <etl_basename>_<suffix>.pkl
+            description – first docstring block (first 25 lines of file)
+    """
+    import ast as _ast
+
+    # -- Section 1: Adapted Instructions -----------------------------------------
+    instructions = (
+        "STANDALONE SCRIPT CODING RULES\n"
+        "================================\n"
+        "1. Do NOT use Jupyter notebooks. Write a standalone .py file.\n"
+        "2. Runtime: `speed.exe run standalone_<name>.py --etl_file <path>`\n"
+        "3. Load trace: `trace = tracedm.load_trace(etl_file=etl_file_path)`\n"
+        "4. Use high-level API when possible:\n"
+        "     trace.os_trace.get_c0_intervals()  — C0 active intervals per CPU\n"
+        "     trace.os_trace.get_cpu_frequencies() — per-core frequency over time\n"
+        "     trace.os_trace.get_cpu_utilization() — per-core C0 utilization %\n"
+        "     trace.os_trace.get_cpu_concurrency() — concurrent active threads\n"
+        "     trace.os_trace.get_processes()        — process lifetime intervals\n"
+        "     trace.os_trace.get_disk_intervals()   — disk I/O intervals\n"
+        "     trace.os_trace.get_gpu_frames()       — GPU present frame info\n"
+        "     trace.os_trace.get_gpu_intervals()    — GPU activity intervals\n"
+        "     trace.os_trace.get_context_switches() — context switch events\n"
+        "     trace.os_trace.get_event_intervals()  — start/stop event pairs\n"
+        "5. For custom ETW events (no high-level API), use:\n"
+        "     trace.get_events(event_types=['Provider/EventName/win:Info'])\n"
+        "   Access fields with ev['FieldName'] — use ev.get('F','default') safely.\n"
+        "6. PKL output: save a dict with named pd.DataFrame values.\n"
+        "     PKL path: <etl_dir>/<etl_basename>_<PKL_SUFFIX>.pkl\n"
+        "7. Always include a 'meta' key in the PKL dict.\n"
+        "8. Do NOT import: speed.explorer, tracedm.events, ev.filter_provider.\n"
+        "9. Be concise — convert the requirement to accurate code directly.\n"
+        "10. If ambiguous, ask for clarification before generating code.\n"
+    )
+
+    # -- Section 2: SPEED API Reference ------------------------------------------
+    api_ref_path = ETL_STANDALONE_DIR / "docs" / "speed_api_reference.md"
+    try:
+        speed_api = api_ref_path.read_text(encoding="utf-8")
+    except Exception as exc:
+        speed_api = f"[ERROR reading speed_api_reference.md: {exc}]"
+
+    # -- Section 3: Existing Scripts Catalog -------------------------------------
+    existing_scripts = []
+    for script_file in sorted(ETL_STANDALONE_DIR.glob("standalone_*.py")):
+        stem = script_file.stem                       # e.g. "standalone_containment"
+        name = stem[len("standalone_"):]              # e.g. "containment"
+        try:
+            raw = script_file.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            raw = ""
+
+        # Extract the module-level docstring (first 25 lines as fallback)
+        docstring = ""
+        try:
+            tree = _ast.parse(raw)
+            expr = tree.body[0] if tree.body else None
+            if isinstance(expr, _ast.Expr) and isinstance(expr.value, _ast.Constant):
+                docstring = expr.value.value.strip()
+        except Exception:
+            pass
+        if not docstring:
+            docstring = "\n".join(raw.splitlines()[:25]).strip()
+
+        # Extract PKL_SUFFIX from the file body (looks for PKL_SUFFIX = "...")
+        pkl_suffix = name  # default: same as script name
+        for line in raw.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("PKL_SUFFIX") and "=" in stripped:
+                try:
+                    pkl_suffix = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+                except Exception:
+                    pass
+                break
+
+        existing_scripts.append({
+            "name": name,
+            "filename": script_file.name,
+            "pkl_suffix": pkl_suffix,
+            "description": docstring,
+        })
+
+    return {
+        "instructions": instructions,
+        "speed_api": speed_api,
+        "existing_scripts": existing_scripts,
+        "usage_hint": (
+            "Use 'instructions' + 'speed_api' to write analysis_logic, "
+            "then call create_custom_standalone_script(). "
+            "Check 'existing_scripts' to avoid duplicating existing work."
+        ),
+    }
+
+
+@mcp.tool()
+@async_tool
 @embed_if_large(threshold=7000)
 def create_custom_standalone_script(
     script_name: str,
@@ -506,6 +621,10 @@ def create_custom_standalone_script(
     the local etl_standalone/ folder.  Only the analysis_logic body is needed —
     the boilerplate (SPEED kernel setup, PKL cache check, PKL save, main) is
     written automatically.
+
+    IMPORTANT: Call get_etl_script_context() FIRST to get the full SPEED API
+    reference, adapted coding instructions, and the catalog of existing scripts.
+    Use that context to craft analysis_logic correctly before calling this tool.
 
     Args:
         script_name:    Short name, e.g. 'my_metric'. File: standalone_my_metric.py

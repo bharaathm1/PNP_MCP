@@ -139,7 +139,7 @@ def extract_ppm_settings_change(trace):
 
 
 def analyze_ppm_behaviour(ppm_settings_df: pd.DataFrame, constraints_file: str = None) -> pd.DataFrame:
-    """Compare PPM settings against a constraints file."""
+    """Compare PPM settings against a constraints file. (Retained for optional external calls.)"""
     try:
         if ppm_settings_df.empty:
             return pd.DataFrame()
@@ -175,9 +175,7 @@ def analyze_ppm_behaviour(ppm_settings_df: pd.DataFrame, constraints_file: str =
 
 def main():
     parser = argparse.ArgumentParser(description="Standalone PPM Analysis (speed.exe)")
-    parser.add_argument("--etl_file",            required=True)
-    parser.add_argument("--ppm_constraints",     default=DEFAULT_PPM_CONSTRAINT_FILE)
-    parser.add_argument("--ppm_val_constraints", default=DEFAULT_PPM_VAL_CONSTRAINT_FILE)
+    parser.add_argument("--etl_file", required=True)
     args = parser.parse_args()
 
     if not os.path.exists(args.etl_file):
@@ -195,19 +193,12 @@ def main():
     trace = tracedm.load_trace(etl_file=args.etl_file)
     print(f"[LOAD] OK — {type(trace).__name__}")
 
-    df_ppm_settings     = extract_ppm_settings_rundown(trace)
+    df_ppm_settings      = extract_ppm_settings_rundown(trace)
     df_ppmsettingschange = extract_ppm_settings_change(trace)
-    df_ppm_behaviour    = analyze_ppm_behaviour(df_ppm_settings, args.ppm_constraints)
-    df_ppm_validation   = analyze_ppm_behaviour(df_ppm_settings, args.ppm_val_constraints)
-
-    print(f"[PPM] behaviour rows: {len(df_ppm_behaviour)}")
-    print(f"[PPM] validation rows: {len(df_ppm_validation)}")
 
     results = {
-        "df_ppm_settings":       df_ppm_settings,
-        "df_ppmsettingschange":  df_ppmsettingschange,
-        "df_PPM_behaviour":      df_ppm_behaviour,
-        "df_PPM_Validation":     df_ppm_validation,
+        "df_ppm_settings":      df_ppm_settings,
+        "df_ppmsettingschange": df_ppmsettingschange,
         "meta": {
             "analysis": PKL_SUFFIX,
             "etl_file": args.etl_file,

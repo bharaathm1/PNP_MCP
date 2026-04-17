@@ -3979,41 +3979,44 @@ def find_socwatch_files(parent_folder, force_reparse: bool = False, debug: bool 
         has_timestamp = bool(re.match(r'\d{8}T\d{6}', stem))
         return not has_timestamp  # timestamp-named files are raw measurements, not KPI labels
     # ── Cache check ─────────────────────────────────────────────────────────────
-    # Fast path: if markdown + manifest both exist, read the file list from the
-    # manifest directly — no folder scan needed.  The expensive glob + content
+    # Fast path: the output markdown existing with content is sufficient proof that
+    # parsing already completed — no manifest required.  The expensive glob + content
     # scan only runs on first call or when force_reparse=True.
     if not force_reparse:
         cached_md = output_folder / "socwatch_output_summary.md"
         manifest_file = output_folder / "socwatch_parse_manifest.json"
-        if cached_md.exists() and cached_md.stat().st_size > 0 and manifest_file.exists():
+        if cached_md.exists() and cached_md.stat().st_size > 0:
+            # Try to enrich the response with the file list from manifest, but
+            # never fall through to a live scan just because the manifest is absent.
+            cached_paths = []
             try:
-                import json as _json_sw
-                with open(manifest_file, "r", encoding="utf-8") as _mf:
-                    _manifest = _json_sw.load(_mf)
-                cached_paths = _manifest.get("parsed_files", [])
-                if cached_paths:
-                    _cn = [Path(p).name for p in cached_paths]
-                    _sample = _cn[:5]
-                    _extra = len(_cn) - 5
-                    _names_str = ", ".join(_sample) + (f" ... and {_extra} more" if _extra > 0 else "")
-                    return {
-                        "found": True,
-                        "output_folder": str(output_folder),
-                        "file_count": len(cached_paths),
-                        "file_paths": cached_paths,
-                        "file_names": _sample + ([f"... and {_extra} more"] if _extra > 0 else []),
-                        "content_detected": [],
-                        "already_parsed": True,
-                        "kpi_context_files": [],
-                        "message": (
-                            f"Cached results found ({len(cached_paths)} SocWatch file(s): {_names_str}). "
-                            f"socwatch_output_summary.md already exists. "
-                            f"Pass force_reparse=true to re-parse."
-                        ),
-                    }
+                if manifest_file.exists():
+                    import json as _json_sw
+                    with open(manifest_file, "r", encoding="utf-8") as _mf:
+                        _manifest = _json_sw.load(_mf)
+                    cached_paths = _manifest.get("parsed_files", [])
             except Exception:
                 pass
-        # No manifest, empty, or parse error → fall through to live scan
+            _cn = [Path(p).name for p in cached_paths]
+            _sample = _cn[:5]
+            _extra = len(_cn) - 5
+            _names_str = ", ".join(_sample) + (f" ... and {_extra} more" if _extra > 0 else "")
+            return {
+                "found": True,
+                "output_folder": str(output_folder),
+                "file_count": len(cached_paths),
+                "file_paths": cached_paths,
+                "file_names": _sample + ([f"... and {_extra} more"] if _extra > 0 else []),
+                "content_detected": [],
+                "already_parsed": True,
+                "kpi_context_files": [],
+                "message": (
+                    f"Cached results found"
+                    + (f" ({len(cached_paths)} SocWatch file(s): {_names_str})" if _names_str else "")
+                    + f". socwatch_output_summary.md already exists. "
+                    f"Pass force_reparse=true to re-parse."
+                ),
+            }
     # ── End cache check ─────────────────────────────────────────────────────────
     
     # Find all CSV files recursively, but exclude files from folders starting with 'socwatch_output'
@@ -4170,21 +4173,17 @@ def parse_socwatch_data(
             "excel_path": excel_path,
             "message": (
                 f"Pipeline {'loaded from cache' if cached else 'compiled'}. "
-                f"{len(section_names)} sections available: {section_names}. "
-                f"Excel: {excel_path}. "
+                f"{len(section_names)} sections available. "
                 "Use query_socwatch_data(parent_folder, sections=[...]) to view section content."
             ),
         }
 
     # ── Cache check ──────────────────────────────────────────────────────────────
-    # Fast path: if markdown + manifest both exist, trust the cache without
-    # re-scanning the (potentially slow UNC) folder. A full re-scan only
+    # Fast path: the output markdown existing with content is sufficient proof that
+    # parsing already completed — no manifest required.  A full re-scan only
     # happens when force_reparse=True.
     if not force_reparse and os.path.exists(cached_md) and os.path.getsize(cached_md) > 0:
-        _manifest_path = output_dir / "socwatch_parse_manifest.json"
-        if _manifest_path.exists():
-            return _build_compact_metadata(files_parsed=0, cached=True)
-        # No manifest → old-style cache → fall through and re-parse
+        return _build_compact_metadata(files_parsed=0, cached=True)
     # ── End cache check ──────────────────────────────────────────────────────────
 
     # Ensure output folder exists
@@ -4322,7 +4321,9 @@ def parse_socwatch_data(
     description=(
         "Query the compiled SocWatch markdown summary and return specific sections. "
         "Use this for ALL user-facing content after parse_socwatch_data has run. "
-        "Returns only the requested section(s) as compact text (< 2 KB per section). "
+        "IMPORTANT: maximum 4 sections per call to keep LLM context small and fast. "
+        "If you need more sections, call this tool multiple times with up to 4 sections each. "
+        "Returns only the requested section(s) as compact text. "
         "Never return summary_table from parse_socwatch_data directly — use this tool."
     ),
     tags={"socwatch", "query", "filter", "sections"},
@@ -4333,6 +4334,8 @@ def query_socwatch_data(
     sections: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Query the compiled SocWatch markdown for specific sections. Low token cost."""
+    _MAX_SECTIONS_PER_CALL = 4
+    _MAX_SECTION_CHARS = 1500  # per-section content hard cap
     _PRIORITY_SECTIONS = [
         "Package C-State", "Core C-State", "CPU P-State", "MEMSS P-State", "Thread Wakeups"
     ]
@@ -4363,6 +4366,7 @@ def query_socwatch_data(
             "file_size_bytes": md_path.stat().st_size,
         }
 
+    remaining_sections: List[str] = []
     if sections:
         secs_lower = [s.lower() for s in sections]
         matched = {
@@ -4375,8 +4379,13 @@ def query_socwatch_data(
                 "error": f"No sections matched {sections}.",
                 "all_sections": all_section_names,
             }
+        # Enforce per-call section cap — return first N, report the rest
+        if len(matched) > _MAX_SECTIONS_PER_CALL:
+            matched_items = list(matched.items())
+            remaining_sections = [k for k, _ in matched_items[_MAX_SECTIONS_PER_CALL:]]
+            matched = dict(matched_items[:_MAX_SECTIONS_PER_CALL])
     else:
-        # Default: 5 priority sections
+        # Default: 5 priority sections (capped to 4)
         p_lower = [p.lower() for p in _PRIORITY_SECTIONS]
         matched = {
             k: v for k, v in sections_map.items()
@@ -4385,22 +4394,29 @@ def query_socwatch_data(
         if not matched:
             # Fallback: return first 3 sections
             matched = dict(list(sections_map.items())[:3])
+        if len(matched) > _MAX_SECTIONS_PER_CALL:
+            matched_items = list(matched.items())
+            remaining_sections = [k for k, _ in matched_items[_MAX_SECTIONS_PER_CALL:]]
+            matched = dict(matched_items[:_MAX_SECTIONS_PER_CALL])
 
     # Build content with explicit section name headers so agent context is clear
+    # Apply per-section content cap to prevent context window bloat
     content_parts = []
     for sec_name, sec_content in matched.items():
+        if len(sec_content) > _MAX_SECTION_CHARS:
+            sec_content = sec_content[:_MAX_SECTION_CHARS] + "\n... [truncated — section too long]"
         content_parts.append(f"## {sec_name}\n{sec_content}")
     content = "\n\n".join(content_parts)
 
-    return {
+    result: Dict[str, Any] = {
         "success": True,
         "content": content,
         "sections_shown": list(matched.keys()),
-        "all_sections": all_section_names,
-        "markdown_path": str(md_path),
-        "message": (
-            f"Showing {len(matched)} section(s): {list(matched.keys())}. "
-            f"All {len(all_section_names)} sections: {all_section_names}. "
-            "Pass sections=[...] to query specific sections."
-        ),
     }
+    if remaining_sections:
+        result["remaining_sections"] = remaining_sections
+        result["hint"] = (
+            f"Only {_MAX_SECTIONS_PER_CALL} sections returned to limit context size. "
+            f"Call query_socwatch_data again with sections={remaining_sections} for the rest."
+        )
+    return result

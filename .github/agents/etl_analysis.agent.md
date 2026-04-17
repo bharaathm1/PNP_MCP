@@ -26,6 +26,14 @@ RULE 1 — "trace summary" / "summarize" / "analyze" / "overview" / "get started
 
 RULE 2 — After showing trace summary tables, present a numbered menu and STOP.
          Never run another script until the user explicitly picks one.
+         ⛔ The initial summary NEVER runs ppm, wlc, df_threadstat, cpu_freq_util,
+            or any other standalone script — those are menu options only.
+         ⛔ The initial summary contains EXACTLY three sections:
+            (a) Top processes by CPU utilization + QoS class
+            (b) Per-core utilization + frequency breakdown
+            (c) Trace metadata (duration, ETL size)
+            Nothing else. Do not add PPM, thread switch reasons, C-state residency,
+            WLC, or any other analysis to the initial summary.
 
 RULE 3 — comprehensive_analysis only runs when user explicitly says
          "full analysis" or "comprehensive". Never auto-run it.
@@ -48,6 +56,18 @@ RULE 5 — ETL DATAFRAME KB (embedded below) tells you WHICH DataFrame to use an
 
          ⛔ Do NOT call search_etl_dataframe_knowledge at session start or during
             discovery — only call it immediately before writing execute_python_code.
+
+RULE 6 — RETRY LIMIT: maximum 3 execute_python_code attempts per analysis task.
+         After 3 failures on the same task, STOP and report:
+           • What was attempted
+           • The exact error from the last attempt
+           • What the user should check (PKL keys, column names, file path)
+         Do NOT keep trying different approaches indefinitely.
+         Do NOT call load_dataframes_from_pickle to "inspect" columns between attempts —
+         that wastes a tool call. Instead, print the keys/columns in the first
+         execute_python_code attempt itself and use that output to fix the next call.
+         ⛔ Deleting and re-running standalone scripts counts as a retry.
+            Only do this once if a PKL appears stale. Never delete+rerun more than once.
 ```
 
 ---
@@ -151,6 +171,10 @@ Never ask the user "what do you want to do?" before running it.**
 
 **Copy this block exactly. Replace `<pkl_path>` with the actual PKL path. Run it.**
 
+This block outputs EXACTLY three sections: (a) top processes + QoS, (b) per-core
+utilization + frequency, (c) trace metadata. Do NOT add PPM, WLC, thread stats,
+or any other analysis — those are menu items.
+
 ```python
 execute_python_code("""
 import pickle, sys
@@ -163,129 +187,75 @@ except ImportError:
 
 PKL = r'<pkl_path>'
 data = pickle.load(open(PKL, 'rb'))
-print('PKL keys:', list(data.keys()), '\\n')
 
-# ── helper ──────────────────────────────────────────────────────────────────
 def first_col(df, candidates):
     return next((c for c in candidates if c in df.columns), df.columns[0])
 
-def show(title, df, sort_col=None, n=None):
-    print(f'### {title}  ({len(df)} rows)')
-    out = df.copy()
-    if sort_col and sort_col in out.columns:
-        out = out.sort_values(sort_col, ascending=False)
-    if n:
-        out = out.head(n)
-        if n < len(df):
-            print(f'(top {n} of {len(df)} by {sort_col})')
-    print(_tab(out.round(2)))
-    print()
-
-# ── 1. Process stats ─────────────────────────────────────────────────────────
+# ── (a) Top 15 Processes by CPU Utilization + QoS class ─────────────────────
 key = next((k for k in ['df_process_stats','df_process_stats_summary'] if k in data), None)
+qos_key = next((k for k in ['df_qos_per_process','df_qos_per_process_summary'] if k in data), None)
 if key:
     df = data[key]
     proc  = first_col(df, ['Process','process_name','ProcessName'])
     util  = first_col(df, ['Utilization(%)','utilization_pct','cpu_utilization_pct'])
-    rt    = first_col(df, ['Runtime(s)','runtime_s','Runtime'])
-    conc  = first_col(df, ['Concurrency','concurrency'])
     sw    = first_col(df, ['Switch-Out Count','switch_out_count','SwitchOuts'])
     svc   = first_col(df, ['Hosted Service','hosted_service','Service'])
-    cols  = [c for c in [proc,'PID',util,rt,conc,sw,svc] if c in df.columns]
+    cols  = [c for c in [proc,'PID',util,sw,svc] if c in df.columns]
     top   = df[cols].sort_values(util, ascending=False).head(15)
-    print(f'### Top 15 Processes by CPU Utilization  ({len(df)} total processes)')
+    _top15_names = top[proc].tolist()
+
+    # Attach dominant QoS class per process
+    if qos_key:
+        qdf  = data[qos_key]
+        qp   = first_col(qdf, ['Process','process_name'])
+        qcols = [c for c in qdf.columns if c not in [qp,'PID']]
+        if qcols:
+            qdf2    = qdf[qdf[qp].isin(_top15_names)].copy()
+            qdf2['QoS'] = qdf2[qcols].idxmax(axis=1)
+            top = top.merge(qdf2[[qp,'QoS']].rename(columns={qp:proc}), on=proc, how='left')
+
+    print(f'### (a) Top 15 Processes by CPU Utilization  ({len(df)} total processes)')
     print(_tab(top.round(2)))
     p1 = top.iloc[0]
-    print(f'>> #1 consumer: {p1[proc]}  {p1[util]:.2f}%  ({int(p1[sw]):,} ctx-switches)' if sw in p1 else f'>> #1 consumer: {p1[proc]}  {p1[util]:.2f}%')
+    print(f'>> #1 consumer: {p1[proc]}  {p1[util]:.2f}%  ({int(p1[sw]):,} ctx-switches)' if sw in top.columns else f'>> #1 consumer: {p1[proc]}  {p1[util]:.2f}%')
     print(f'>> Total processes tracked: {len(df)}')
     print()
-    _top15_names = top[proc].tolist()
 else:
-    _top15_names = []
     print('[SKIP] df_process_stats not found\\n')
+    _top15_names = []
 
-# ── 2. QoS per process ───────────────────────────────────────────────────────
-key = next((k for k in ['df_qos_per_process','df_qos_per_process_summary'] if k in data), None)
-if key:
-    df = data[key]
-    proc = first_col(df, ['Process','process_name'])
-    filt = df[df[proc].isin(_top15_names)] if _top15_names else df.head(15)
-    if filt.empty:
-        filt = df.head(15)
-    order = {p: i for i, p in enumerate(_top15_names)}
-    filt = filt.copy()
-    filt['_r'] = filt[proc].map(lambda x: order.get(x, 999))
-    filt = filt.sort_values('_r').drop(columns='_r')
-    qos_cols = [c for c in df.columns if c not in ['_r']]
-    print(f'### QoS Residency per Process — top CPU consumers  ({len(df)} total processes)')
-    print(_tab(filt[qos_cols].round(1)))
-    qos_only = [c for c in df.columns if c not in [proc,'PID','_r']]
-    if qos_only:
-        dominant = filt[qos_only].idxmax(axis=1)
-        from collections import Counter
-        top_class = Counter(dominant).most_common(1)[0][0]
-        print(f'>> Most common dominant QoS class among top processes: {top_class}')
+# ── (b) Per-Core Utilization + Frequency ────────────────────────────────────
+util_key = next((k for k in ['df_utilization_per_logical','df_utilization_per_logical_summary'] if k in data), None)
+freq_key = next((k for k in ['df_cpu_frequency_stats','df_cpu_frequency_summary'] if k in data), None)
+if util_key and freq_key:
+    import pandas as pd
+    u = data[util_key].copy()
+    f = data[freq_key].copy()
+    ucpu = first_col(u, ['CPU','cpu','Core'])
+    uval = first_col(u, ['Utilization(%)','utilization_pct','Utilization'])
+    fcpu = first_col(f, ['CPU','cpu','Core'])
+    fmhz = first_col(f, ['Frequency(MHz)','frequency_mhz','Avg Freq(MHz)'])
+    merged = u[[ucpu,uval]].merge(f[[fcpu,fmhz]].rename(columns={fcpu:ucpu}), on=ucpu, how='left')
+    merged.columns = ['CPU', 'Utilization(%)', 'Avg Freq(MHz)']
+    print(f'### (b) Per-Core Utilization + Frequency  ({len(merged)} cores)')
+    print(_tab(merged.round(2)))
+    p = merged[merged['CPU'] <= 1]
+    e = merged[merged['CPU'] >= 2]
+    print(f'>> P-cores avg: {p["Utilization(%)"].mean():.1f}% util  {p["Avg Freq(MHz)"].mean():.0f} MHz')
+    print(f'>> E-cores avg: {e["Utilization(%)"].mean():.1f}% util  {e["Avg Freq(MHz)"].mean():.0f} MHz')
+    hotspot = merged.loc[merged['Utilization(%)'].idxmax()]
+    print(f'>> Hotspot: CPU {int(hotspot["CPU"])} at {hotspot["Utilization(%)"]:.1f}%')
     print()
-else:
-    print('[SKIP] df_qos_per_process not found\\n')
-
-# ── 3. QoS per core ──────────────────────────────────────────────────────────
-key = next((k for k in ['df_qos_per_core','df_qos_per_core_summary'] if k in data), None)
-if key:
-    df = data[key]
-    show('QoS Residency per Logical CPU', df)
-    qos_only = [c for c in df.columns if c not in ['CPU','cpu','Core','core']]
-    cpu_col  = first_col(df, ['CPU','cpu','Core','core'])
-    if qos_only:
-        hi_col = 'High' if 'High' in df.columns else qos_only[0]
-        busiest = df.loc[df[hi_col].idxmax(), cpu_col] if hi_col in df.columns else 'N/A'
-        print(f'>> Core with most High-QoS time: {busiest}')
+elif util_key:
+    u = data[util_key].copy()
+    print(f'### (b) Per-Core Utilization  ({len(u)} cores)')
+    print(_tab(u.round(2)))
     print()
-else:
-    print('[SKIP] df_qos_per_core not found\\n')
 
-# ── 4. CPU frequency ─────────────────────────────────────────────────────────
-key = next((k for k in ['df_cpu_frequency_stats','df_cpu_frequency_summary'] if k in data), None)
-if key:
-    df = data[key].copy()
-    mhz = first_col(df, ['Frequency(MHz)','frequency_mhz','avg_frequency_mhz','Avg Freq(MHz)'])
-    cpu = first_col(df, ['CPU','cpu','Core'])
-    if 'GHz' not in df.columns:
-        df['GHz'] = (df[mhz] / 1000).round(2)
-    show_cols = [c for c in [cpu, mhz, 'GHz'] + list(df.columns) if c in df.columns]
-    seen = set(); show_cols = [c for c in show_cols if not (c in seen or seen.add(c))]
-    print(f'### CPU Frequency Stats  ({len(df)} cores)')
-    print(_tab(df[show_cols].round(2)))
-    print(f'>> Frequency range: {df[mhz].min():.0f} – {df[mhz].max():.0f} MHz  '
-          f'({df[mhz].min()/1000:.2f} – {df[mhz].max()/1000:.2f} GHz)')
-    if df[mhz].max() - df[mhz].min() > 200:
-        print(f'>> ⚠ Large frequency spread ({df[mhz].max()-df[mhz].min():.0f} MHz) — possible throttling on some cores')
-    print()
-else:
-    print('[SKIP] df_cpu_frequency_stats not found\\n')
-
-# ── 5. Utilization per logical CPU ───────────────────────────────────────────
-key = next((k for k in ['df_utilization_per_logical','df_utilization_per_logical_cpu'] if k in data), None)
-if key:
-    df = data[key].copy()
-    util = first_col(df, ['Utilization(%)','utilization_pct','util_pct','Utilization'])
-    cpu  = first_col(df, ['CPU','cpu','Core'])
-    show_cols = list(df.columns)
-    print(f'### Utilization per Logical CPU  ({len(df)} cores)')
-    print(_tab(df[show_cols].round(2)))
-    print(f'>> Utilization range: {df[util].min():.1f}% – {df[util].max():.1f}%')
-    imb = df[util].max() - df[util].min()
-    if imb > 20:
-        busiest = df.loc[df[util].idxmax(), cpu]
-        print(f'>> ⚠ Load imbalance: {imb:.1f}% spread — {busiest} is the busiest core')
-    print()
-else:
-    print('[SKIP] df_utilization_per_logical not found\\n')
-
-# ── 6. Meta ───────────────────────────────────────────────────────────────────
+# ── (c) Trace Metadata ───────────────────────────────────────────────────────
 if 'meta' in data:
     m = data['meta']
-    print('### Trace Metadata')
+    print('### (c) Trace Metadata')
     if hasattr(m, 'items'):
         for k, v in m.items():
             print(f'  {k}: {v}')
@@ -458,3 +428,6 @@ Available: `fps_calculation`, `vcip_alignment`, `comprehensive_analysis`,
 | Empty DataFrames after run | Check ETL integrity; report keys present in PKL |
 | No PKL after run | Check stdout from `run_standalone_script` for `[ERROR]` lines |
 | df_trace_summary returns empty DFs | ETL may be missing required providers; report keys in PKL |
+| execute_python_code fails | Fix and retry — max 3 attempts total, then report error and stop |
+| Unexpected PKL columns / keys | Print `list(data.keys())` and column names in attempt 1; use that output to write attempt 2 |
+| Stale PKL suspected | Delete and rerun once only — if it fails again, report and stop |
